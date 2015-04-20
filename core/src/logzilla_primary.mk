@@ -1,0 +1,2 @@
+SRC=
+CFLAGS+= -I ../include
