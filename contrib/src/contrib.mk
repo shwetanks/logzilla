@@ -1,6 +1,6 @@
 TARGET=contrib.a
 
-SRC=
+SRC=skipcompile.c
 INCLUDES+=../include
 
 include ../../core/make/logzilla.mk

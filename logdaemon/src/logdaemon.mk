@@ -1,11 +1,8 @@
 TARGET=logdaemon
 
-SRC=
+SRC=logdaemon.c
 
-LDFLAGS+=-L../../core/lib -llogzilla -pthread -lm -lz -ldl -lrt
-LDFLAGS+=-L ../../third_party/lib
-LDFLAGS+=-L../../contrib/lib -lcontrib
-
-CFLAGS+= -I ../../core/include -I ../../contrib/include -I ../include -I .
+CFLAGS+= -I ../../core/include -I ../include -I .
+LDFLAGS+=-lm -lz -ldl -L../../core/lib -llogzilla -lrt
 
 include ../../core/make/logzilla.mk
