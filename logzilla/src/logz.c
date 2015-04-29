@@ -4,10 +4,26 @@
 #include <stdbool.h>
 #include <libgen.h>
 #include <sys/stat.h>
+#include "http_client_pool.h"
+#include "logz_util.h"
+#include "uri_encode.h"
 
 struct logdaemon_config logconf = LOGDAEMON_INITIALIZER;
 
+/* this server */
+static char *hostname = NULL;
+
+/* server where we push data, if specified */
+struct receiving_server eserv;
+
 #define MAX_FILE_SUPPORT 10
+#define HTTP_CLIENT_TIMEOUT 60000
+
+struct http_client_pool client_pool = {
+    .timeout_handler.timeout = HTTP_CLIENT_TIMEOUT,
+    .timeout_handler_persistent.timeout = HTTP_CLIENT_TIMEOUT
+};
+
 
 struct logz_file_def {
     char *name;            /* file name */
@@ -24,27 +40,20 @@ struct logz_file_def {
 static const uint32_t inotify_file_watch_mask = (IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
 
 #define COPY_TO_EOF UINTMAX_MAX
-#define COPY_BUFFER (UINTMAX_MAX - 1)
-
-#ifndef MAX
-# define MAX(a, b) ((a) > (b) ? (a) : (b))
-#endif
-
-#ifndef MIN
-# define MIN(a,b) (((a) < (b)) ? (a) : (b))
-#endif
 
 struct thashtable *tab_event_fds;
 struct thashtable *delta_push;
 
 struct vmbuf write_buffer = VMBUF_INITIALIZER;
+struct vmbuf mb = VMBUF_INITIALIZER;
 static struct file_writer fw;
+
 
 static int
 timecmp (struct timespec a, struct timespec b) {
-  return (a.tv_sec < b.tv_sec ? -1
-          : a.tv_sec > b.tv_sec ? 1
-          : (int) (a.tv_nsec - b.tv_nsec));
+    return (a.tv_sec < b.tv_sec ? -1
+            : a.tv_sec > b.tv_sec ? 1
+            : (int) (a.tv_nsec - b.tv_nsec));
 }
 
 struct timespec
@@ -61,21 +70,82 @@ logz_close_fd (int fd, const char *filename) {
         LOGGER_ERROR("failed to close file:%s (%d)", filename, fd);
 }
 
+void
+_replace(
+    char *in,
+    struct vmbuf *out,
+    const char *find,
+    const char *replace) {
+
+    char *fstart;
+
+    vmbuf_reset(out);
+    if(!(fstart = strstr(in, find))) {
+        vmbuf_strcpy(out, in);
+        return;
+    }
+    char *remainder = ribs_strdup(fstart + strlen(find));
+
+    vmbuf_memcpy(out, in, fstart-in);
+    vmbuf_sprintf(out, "%s%s", replace, remainder);
+    return;
+}
+
+char*
+replace_all (
+    char* const in,
+    const char* find,
+    const char* replace_with){
+
+    char* buffer = ribs_strdup(in);
+    char* ptr = strstr(buffer, find);
+    while(ptr && *ptr){
+        *ptr = '\0';
+        ptr += strlen(find);
+        buffer = ribs_malloc_sprintf("%s%s%s", buffer, replace_with, ptr);
+        ptr = strstr(buffer, find);
+    }
+    return buffer;
+}
+
 
 static void
-write_out_stream (const char *filename, size_t write_depth, char *data) {
-    UNUSED(filename);
-    if (0 < write_depth) {
-        if (0 > file_writer_write(&fw, data, write_depth)) {
-            LOGGER_ERROR("%s", "failed write attempt on outfile| aborting to diagnose!");
-            abort();
-        }
+write_out_stream (const char *filename, char *data) {
+    char *d = ribs_malloc_sprintf("{ \"message\": \"%s|%s|%s\" }", hostname, filename, data);
+#ifdef WRITE_TO_FILE
+    if (0 > file_writer_write(&fw, d, strlen(d))) {
+        LOGGER_ERROR("%s", "failed write attempt on outfile| aborting to diagnose!");
+        abort();
     }
+    return;
+#endif
+    struct http_client_context *cctx = http_client_pool_post_request_init(&client_pool, eserv.server, eserv.port, eserv.hostname, "%s/%s", eserv.context, hostname);
+    if (NULL == cctx) {
+        LOGGER_PERROR("failed to send request %s. no context available | critical ", eserv.hostname);
+        exit(EXIT_FAILURE); //its futile to continue..we're losing data
+    }
+    // set content-type
+    vmbuf_sprintf(&cctx->request, "\r\nContent-Type: %s", "application/json");
+    char* ra = replace_all(d, "\n", "\\n");
+    vmbuf_sprintf(&cctx->request, "\r\nContent-Length: %zu\r\n\r\n", strlen(ra));
+    vmbuf_memcpy(&cctx->request, ra, strlen(ra));
+    vmbuf_chrcpy(&cctx->request, '\0');
+    if (0 > http_client_send_request(cctx)) {
+        http_client_free(cctx);
+        LOGGER_PERROR("failed to send request %s ", eserv.hostname);
+        exit(EXIT_FAILURE); //its futile to continue..we're losing data
+    }
+
+    yield();
+    cctx = http_client_get_last_context();
+    if (cctx->http_status_code != 201)
+        LOGGER_PERROR("http_post failed with response code %d", cctx->http_status_code);
+    http_client_free(cctx);
 }
+
 
 static char *
 write_file_fringe (const char *filename, char *data, int fd) {
-
     thashtable_rec_t *rec = thashtable_lookup(delta_push, &fd, sizeof(fd));
     struct vmbuf delta = *(struct vmbuf *)thashtable_get_val(rec);
     char *past = vmbuf_data(&delta);
@@ -86,7 +156,7 @@ write_file_fringe (const char *filename, char *data, int fd) {
         char *trailing_past = ribs_malloc_sprintf("%.*s", ((int)strlen(data) - (int)strlen(lookahead)), data);
         if (trailing_past) {
             char *d_composite = ribs_malloc_sprintf("%s%s", past, trailing_past);
-            write_out_stream(filename, strlen(d_composite), d_composite);
+            write_out_stream(filename, d_composite);
             d_composite += strlen(d_composite); // advance by that
             vmbuf_reset(&delta);
         }
@@ -94,42 +164,41 @@ write_file_fringe (const char *filename, char *data, int fd) {
     return lookahead;
 }
 
-static uintmax_t
+static void
 trigger_writer (
     const char *filename,
-    struct logz_file_def *filedef,
-    uintmax_t n_bytes) {
-
-    uintmax_t n_written = 0;
-    uintmax_t n_remaining = n_bytes;
+    struct logz_file_def *filedef) {
 
     vmbuf_reset(&write_buffer);
-    size_t res;
+    ssize_t res;
+    char *fn = basename(ribs_strdup(filename));
     while(1) {
         vmbuf_reset(&write_buffer);
+        res = read(filedef->fd, vmbuf_wloc(&write_buffer), (BUFSIZ + 1024) &~ 1024);
 
+        filedef->size += res;
         lseek (filedef->fd, filedef->size, SEEK_SET);
-        size_t rsize = MIN(n_remaining, (BUFSIZ + 1024) &~ 1024);
-        res = read(filedef->fd, vmbuf_wloc(&write_buffer), rsize);
 
         if (0 > vmbuf_wseek(&write_buffer, res)) {
-            return false;
-        } else if (res == ((size_t) - 1)) {
-            if (errno != EAGAIN)
-                LOGGER_ERROR("error reading %s",filename);
+            LOGGER_ERROR("%s", "wseek error");
+            break;
+        } else if (0 > res) {
+            LOGGER_ERROR("%s", "read error"); // EAGAIN is handled by poller
             break;
         } else if (0 < res) {
-            vmbuf_chrcpy(&write_buffer, '\0');
-            char *data = vmbuf_data(&write_buffer);
-            size_t write_depth = res;
+            // initial sanitizer
+            vmbuf_chrcpy(&write_buffer, '\0'); // kill garbage
+            char *data = ribs_strdup(vmbuf_data(&write_buffer));
+            //data = strchr(data, '\n') + 1; // skip broken data from initial buffer start. we read from where the file was first observed
+            ssize_t write_depth = res = strlen(data);
+            // line doesn't end here
             if (data[res - 1] != '\n') {
-                char *datafringe = ribs_strdup((char *)memrchr(data, '\n', rsize));
+                char *datafringe = ribs_strdup((char *)memrchr(data, '\n', res));
                 if (SSTRISEMPTY(datafringe))
                     break;
                 write_depth = strlen(data) - strlen(datafringe);
                 *(data + write_depth) = 0;
 
-                char *fn = basename(ribs_strdup(filename));
                 if (filedef->size != 0) {
                     char *rebalanced_data = write_file_fringe(fn, data, filedef->fd);
                     if (NULL != rebalanced_data) {
@@ -142,26 +211,16 @@ trigger_writer (
                 struct vmbuf kdelta = *(struct vmbuf *)thashtable_get_val(rec);
                 vmbuf_strcpy(&kdelta, datafringe);
                 vmbuf_chrcpy(&kdelta, '\0');
-
-                write_out_stream(fn, write_depth, data);
-                filedef->size += res;
-
-                n_written += res;
-                if (n_bytes != COPY_TO_EOF) {
-                    n_remaining -= res;
-                    if (n_remaining == 0 || n_bytes == COPY_BUFFER)
-                        break;
-                }
-
             }
 
             vmbuf_reset(&write_buffer);
+            vmbuf_memcpy(&write_buffer, data, write_depth);
+            vmbuf_chrcpy(&write_buffer, '\0');
+            write_out_stream(fn, vmbuf_data(&write_buffer));
         } else if (0 == res) {
             break;
         }
     }
-
-    return n_written;
 }
 
 
@@ -198,8 +257,7 @@ _flush (
         *prev_wd = wd;
     }
 
-    uintmax_t bytes_read = trigger_writer (name, filedef, COPY_TO_EOF);
-    filedef->size += bytes_read;
+    trigger_writer (name, filedef);
 }
 
 
@@ -223,7 +281,6 @@ recursive_flush_events (
     size_t i;
     for (i = 0; i < num_files; i++) {
 
-        //int fd = open(filename, O_RDONLY | O_NONBLOCK, 0644);
         filedef[i].name = files[i];
         size_t fnlen = strlen (filedef[i].name);
         if (evlen < fnlen)
@@ -264,6 +321,21 @@ recursive_flush_events (
             continue;
         }
         filedef[i].fd = open(filedef[i].name, O_RDONLY | O_NONBLOCK);
+        if (0 >= filedef[i].fd) {
+            LOGGER_ERROR("skipping file %s. cannot open to read", filedef[i].name);
+            continue;
+        }
+
+        struct stat stats;
+        if (fstat (filedef[i].fd, &stats) != 0) {
+            LOGGER_ERROR("skipping file %s.cannot stat", filedef[i].name);
+            filedef->errnum = errno;
+            logz_close_fd (filedef[i].fd, filedef[i].name);
+            filedef->fd = -1;
+            continue;
+        }
+        filedef[i].size = stats.st_size;
+        lseek (filedef[i].fd, 0, SEEK_END); // no offset enforced
 
         thashtable_insert(tab_event_fds, &filedef[i].wd, sizeof(filedef[i].wd), &filedef[i], sizeof(filedef[i]), &inserted);
 
@@ -338,8 +410,9 @@ recursive_flush_events (
             thashtable_rec_t *rec = thashtable_lookup(tab_event_fds, &event->wd, sizeof(event->wd));
             tmp = (struct logz_file_def *)thashtable_get_val(rec);
         }
-        if (!tmp)
+        if (!tmp) {
             continue;
+        }
 
         if (event->mask & (IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF)) {
             if (event->mask & IN_DELETE_SELF) {
@@ -353,6 +426,7 @@ recursive_flush_events (
     return true;
 }
 
+
 int main(int argc, char *argv[]) {
 
     size_t num_files = 0;
@@ -362,6 +436,12 @@ int main(int argc, char *argv[]) {
     if (0 > init_log_config(&logconf, argc, argv)) {
         exit(EXIT_FAILURE);
     }
+    if (!SSTRISEMPTY(logconf.target) && !SSTRISEMPTY(logconf.interface)) {
+        LOGGER_ERROR("%s", "cannot write to target and interface together. please choose one");
+        exit(EXIT_FAILURE);
+    }
+        
+
     char *f = logconf.watch_files;
     if (!SSTRISEMPTY(f)) {
         while (f != NULL) {
@@ -378,20 +458,53 @@ int main(int argc, char *argv[]) {
 
     //atexit(cleanup);
     if (0 > epoll_worker_init()) {
-        LOGGER_ERROR("epoll_worker_init failed");
+        LOGGER_ERROR("%s", "epoll_worker_init failed");
         exit(EXIT_FAILURE);
     }
 
     tab_event_fds = thashtable_create();
     delta_push    = thashtable_create();
     vmbuf_init(&write_buffer, 4096);
-    file_writer_make(&fw);
+    vmbuf_init(&mb, 4096);
 
-    if (0 > file_writer_init(&fw, logconf.target)) {
-        LOGGER_ERROR("flie_writer");
+
+    if (SSTRISEMPTY(logconf.interface) && !SSTRISEMPTY(logconf.target)) {
+        file_writer_make(&fw);
+
+        if (0 > file_writer_init(&fw, logconf.target)) {
+            LOGGER_ERROR("%s", "flie_writer");
+            exit(EXIT_FAILURE);
+        }
+
+#define WRITE_TO_FILE 1
+    } else if (!SSTRISEMPTY(logconf.interface)) {
+
+        if (0 > http_client_pool_init(&client_pool, 20, 20)) {
+            LOGGER_ERROR("http_client_pool_init");
+            exit(EXIT_FAILURE);
+        }
+
+        memset(&eserv, 0, sizeof(eserv));
+
+        vmbuf_reset(&write_buffer);
+        _replace(logconf.interface, &write_buffer, "http://www.", "");
+        _replace(logconf.interface, &write_buffer, "http://", "");
+
+        char *interface = vmbuf_data(&write_buffer);
+        eserv.context = ribs_strdup(strstr(interface, "/"));
+        
+        char *ln = strchr(interface, '/');
+        ln = ribs_malloc_sprintf("%.*s", ((int)strlen(interface) - (int)strlen(ln)), interface);
+
+        parse_host_to_inet(ln, eserv.hostname, &eserv.server, &eserv.port);
+    } else {
+        LOGGER_ERROR("%s", "no target defined. please use target or interface");
         exit(EXIT_FAILURE);
     }
 
+    char _hostname[1024];
+    gethostname(_hostname, 1024);
+    hostname = ribs_strdup(_hostname);
 
     int wd = inotify_init();
     if (0 >= wd) {

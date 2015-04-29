@@ -9,13 +9,20 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#define LOGDAEMON_INITIALIZER {NULL, NULL, NULL}
+#define LOGDAEMON_INITIALIZER {NULL, NULL, NULL, NULL}
 
 struct logdaemon_config {
     char *watch_files;
     char *exclude_files;
     char *target;
-    //TODO introduce priority_includes
+    char *interface;
+};
+
+struct receiving_server {
+    char hostname[128];
+    struct in_addr server;
+    uint16_t port;
+    char *context;
 };
 
 void
@@ -25,8 +32,8 @@ usage(char *arg0) {
     printf("usage: \n");
     printf("       %*c  [-f|--files] required(files to watch) supports comma delimited names \n", (int)strlen(arg0), ' ');
     printf("       %*c  [-E|--exclude-like] optional(exclude such files) | not implemented \n", (int)strlen(arg0), ' ');
-    printf("       %*c  [-t|--target]  required(create/append-write to this target file)\n", (int)strlen(arg0), ' ');
-    printf("       %*c  [-e|--events]  optional(listen to these events. defaults to MODIFY)\n", (int)strlen(arg0), ' ');
+    printf("       %*c  [-t|--target]  optional(create/append-write to this target file)\n", (int)strlen(arg0), ' ');
+    printf("       %*c  [-s|--write-to]  optional(receive collated data on this HTTP interface. logs to target otherwise. One of them is required)\n", (int)strlen(arg0), ' ');
     printf("       %*c  [--help] prints this help\n", (int)strlen(arg0), ' ');
     printf("\n");
 
@@ -40,15 +47,15 @@ init_log_config (struct logdaemon_config *config, int argc, char *argv[]) {
     static struct option longopts[] = {
         {"files", 1, 0, 'f'},
         {"exclude-like", 2, 0, 'E'},
-        {"target", 1, 0, 't'},
-//        {"events", 2, 0, 'e'},
+        {"target", 2, 0, 't'},
+        {"write-to", 2, 0, 's'},
         {"help", 0, 0, 1},
         {0, 0, 0, 0}
     };
 
     while (1) {
         int option_index = 0;
-        int c = getopt_long(argc, argv, "f:t:E::", longopts, &option_index);
+        int c = getopt_long(argc, argv, "f:t:s:E::", longopts, &option_index);
         if (c == -1)
             break;
         switch (c) {
@@ -60,6 +67,9 @@ init_log_config (struct logdaemon_config *config, int argc, char *argv[]) {
             break;
         case 'E':
             config->exclude_files = strdup(optarg);
+            break;
+        case 's':
+            config->interface = strdup(optarg);
             break;
         default:
             usage(argv[0]);
