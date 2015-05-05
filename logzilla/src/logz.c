@@ -12,6 +12,7 @@ struct logdaemon_config logconf = LOGDAEMON_INITIALIZER;
 
 /* this server */
 static char *hostname = NULL;
+int request_count = 0;
 
 /* server where we push data, if specified */
 struct receiving_server eserv;
@@ -21,7 +22,7 @@ struct receiving_server eserv;
 
 struct http_client_pool client_pool = {
     .timeout_handler.timeout = HTTP_CLIENT_TIMEOUT,
-    .timeout_handler_persistent.timeout = HTTP_CLIENT_TIMEOUT
+    .timeout_handler_persistent.timeout = HTTP_CLIENT_TIMEOUT * 10
 };
 
 
@@ -135,17 +136,22 @@ write_out_stream (const char *filename, char *data) {
         LOGGER_PERROR("failed to send request %s ", eserv.hostname);
         exit(EXIT_FAILURE); //its futile to continue..we're losing data
     }
-
+    LOGGER_INFO("sending %s", vmbuf_data(&cctx->request));
     yield();
-    cctx = http_client_get_last_context();
-    if (cctx->http_status_code != 201)
-        LOGGER_PERROR("http_post failed with response code %d", cctx->http_status_code);
-    http_client_free(cctx);
+    struct http_client_context *rcctx = http_client_get_last_context();
+    if (rcctx->http_status_code != 201) {
+        LOGGER_PERROR("http_post failed with response code %d", rcctx->http_status_code);
+    } else {
+        LOGGER_INFO("%s|%s", "success", rcctx->content);
+    }
+    http_client_free(rcctx);
+    ++request_count;
 }
 
 
 static char *
 write_file_fringe (const char *filename, char *data, int fd) {
+    UNUSED(filename);
     thashtable_rec_t *rec = thashtable_lookup(delta_push, &fd, sizeof(fd));
     struct vmbuf delta = *(struct vmbuf *)thashtable_get_val(rec);
     char *past = vmbuf_data(&delta);
@@ -156,7 +162,7 @@ write_file_fringe (const char *filename, char *data, int fd) {
         char *trailing_past = ribs_malloc_sprintf("%.*s", ((int)strlen(data) - (int)strlen(lookahead)), data);
         if (trailing_past) {
             char *d_composite = ribs_malloc_sprintf("%s%s", past, trailing_past);
-            write_out_stream(filename, d_composite);
+            //write_out_stream(filename, d_composite);
             d_composite += strlen(d_composite); // advance by that
             vmbuf_reset(&delta);
         }
@@ -258,6 +264,7 @@ _flush (
     }
 
     trigger_writer (name, filedef);
+    LOGGER_INFO("request_count:%d", request_count);
 }
 
 
