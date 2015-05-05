@@ -120,23 +120,30 @@ write_out_stream (const char *filename, char *data) {
     }
     return;
 #endif
-    struct http_client_context *cctx = http_client_pool_post_request_init(&client_pool, eserv.server, eserv.port, eserv.hostname, "%s/%s", eserv.context, hostname);
-    if (NULL == cctx) {
-        LOGGER_PERROR("failed to send request %s. no context available | critical ", eserv.hostname);
-        exit(EXIT_FAILURE); //its futile to continue..we're losing data
-    }
-    // set content-type
-    vmbuf_sprintf(&cctx->request, "\r\nContent-Type: %s", "application/json");
+    /* struct http_client_context *cctx = http_client_pool_post_request_init(&client_pool, eserv.server, eserv.port, eserv.hostname, "%s/%s", eserv.context, hostname); */
+    /* if (NULL == cctx) { */
+    /*     LOGGER_PERROR("failed to send request %s. no context available | critical ", eserv.hostname); */
+    /*     exit(EXIT_FAILURE); //its futile to continue..we're losing data */
+    /* } */
+    /* // set content-type */
+    /* vmbuf_sprintf(&cctx->request, "\r\nContent-Type: %s", "application/json"); */
+    /* char* ra = replace_all(d, "\n", "\\n"); */
+    /* vmbuf_sprintf(&cctx->request, "\r\nContent-Length: %zu\r\n\r\n", strlen(ra)); */
+    /* vmbuf_memcpy(&cctx->request, ra, strlen(ra)); */
+    /* vmbuf_chrcpy(&cctx->request, '\0'); */
+    /* if (0 > http_client_send_request(cctx)) { */
+    /*     http_client_free(cctx); */
+    /*     LOGGER_PERROR("failed to send request %s ", eserv.hostname); */
+    /*     exit(EXIT_FAILURE); //its futile to continue..we're losing data */
+    /* } */
+
     char* ra = replace_all(d, "\n", "\\n");
-    vmbuf_sprintf(&cctx->request, "\r\nContent-Length: %zu\r\n\r\n", strlen(ra));
-    vmbuf_memcpy(&cctx->request, ra, strlen(ra));
-    vmbuf_chrcpy(&cctx->request, '\0');
-    if (0 > http_client_send_request(cctx)) {
-        http_client_free(cctx);
-        LOGGER_PERROR("failed to send request %s ", eserv.hostname);
-        exit(EXIT_FAILURE); //its futile to continue..we're losing data
+    if (0 > http_client_pool_post_request(&client_pool, eserv.server, eserv.port, 
+                                          eserv.hostname, ra, strlen(ra), "%s/%s", 
+                                          eserv.context, hostname)) {
+        LOGGER_ERROR("failed to send request to %s", eserv.hostname);
+        return;
     }
-    LOGGER_INFO("sending %s", vmbuf_data(&cctx->request));
     yield();
     struct http_client_context *rcctx = http_client_get_last_context();
     if (rcctx->http_status_code != 201) {
