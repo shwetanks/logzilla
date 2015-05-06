@@ -141,6 +141,7 @@ post_to_interface (char *data) {
     yield();
     struct http_client_context *rcctx = http_client_get_last_context();
     if (rcctx->http_status_code != 201) {
+        http_client_free(rcctx);
         return LOGGER_ERROR("http_post failed with response code %d", rcctx->http_status_code), -1;
     }
     return http_client_free(rcctx), 0;
@@ -158,8 +159,10 @@ write_out_stream (const char *filename, char *data) {
 #endif
     char* ra = replace_all(d, "\n", "\\n");
     int threshold = INTERFACE_ONERROR_RETRY_THRESHOLD;
-    while (0 > post_to_interface(ra) && (0 < threshold--))
-        post_to_interface(ra);
+    while (0 > post_to_interface(ra) && (0 < threshold--)) {
+        if (0 == post_to_interface(ra))
+            break;
+    }
 }
 
 
