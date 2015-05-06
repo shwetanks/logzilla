@@ -122,13 +122,11 @@ write_out_stream (const char *filename, char *data) {
 #endif
     char* ra = replace_all(d, "\n", "\\n");
     struct http_client_context *cctx = http_client_pool_create_client2(&client_pool, eserv.server, eserv.port, eserv.hostname, NULL);
-    if (NULL == cctx)
-        return -1;
-    vmbuf_strcpy(&cctx->request, "POST ");
-    va_list ap;
-    va_start(ap, format);
-    vmbuf_vsprintf(&cctx->request, format, ap);
-    va_end(ap);
+    if (NULL == cctx) {
+        LOGGER_ERROR("%s", "no context recoverable|FATAL_NO_TERM!");
+        return;
+    }
+    vmbuf_vsprintf(&cctx->request, "POST %s/%s", eserv.context, eserv.hostname);
     vmbuf_sprintf(&cctx->request, " HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nConnection: Keep-Alive\r\nContent-Length: %zu\r\n\r\n", eserv.hostname, strlen(ra));
     vmbuf_memcpy(&cctx->request, ra, strlen(ra));
     if (0 > http_client_send_request(cctx)) {
