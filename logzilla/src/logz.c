@@ -12,7 +12,6 @@ struct logdaemon_config logconf = LOGDAEMON_INITIALIZER;
 
 /* this server */
 static char *hostname = NULL;
-int request_count = 0;
 
 /* server where we push data, if specified */
 struct receiving_server eserv;
@@ -22,7 +21,7 @@ struct receiving_server eserv;
 
 struct http_client_pool client_pool = {
     .timeout_handler.timeout = HTTP_CLIENT_TIMEOUT,
-    .timeout_handler_persistent.timeout = HTTP_CLIENT_TIMEOUT * 10
+    .timeout_handler_persistent.timeout = HTTP_CLIENT_TIMEOUT
 };
 
 
@@ -41,6 +40,7 @@ struct logz_file_def {
 static const uint32_t inotify_file_watch_mask = (IN_MODIFY | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
 
 #define COPY_TO_EOF UINTMAX_MAX
+#define INTERFACE_ONERROR_RETRY_THRESHOLD 2
 
 struct thashtable *tab_event_fds;
 struct thashtable *delta_push;
@@ -110,6 +110,42 @@ replace_all (
 }
 
 
+static int
+http_client_pool_post_request2(
+    struct http_client_pool *http_client_pool,
+    struct in_addr addr, uint16_t port, const char *hostname,
+    const char *data, size_t size_of_data, const char *format, ...) {
+
+    struct http_client_context *cctx = http_client_pool_create_client2(http_client_pool, addr, port, hostname, NULL);
+    if (NULL == cctx)
+        return -1;
+    vmbuf_strcpy(&cctx->request, "POST ");
+    va_list ap;
+    va_start(ap, format);
+    vmbuf_vsprintf(&cctx->request, format, ap);
+    va_end(ap);
+    vmbuf_sprintf(&cctx->request, " HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n", hostname, size_of_data);
+    vmbuf_memcpy(&cctx->request, data, size_of_data);
+    if (0 > http_client_send_request(cctx))
+        return http_client_free(cctx), -1;
+    return 0;
+}
+
+static int
+post_to_interface (char *data) {
+
+    if (0 > http_client_pool_post_request2(&client_pool, eserv.server, eserv.port, eserv.hostname, data, strlen(data), "%s/%s", eserv.context, eserv.hostname)) {
+        return LOGGER_ERROR("failed to send request to %s", eserv.hostname), -1;
+    }
+
+    yield();
+    struct http_client_context *rcctx = http_client_get_last_context();
+    if (rcctx->http_status_code != 201) {
+        return LOGGER_ERROR("http_post failed with response code %d", rcctx->http_status_code), -1;
+    }
+    return http_client_free(rcctx), 0;
+}
+
 static void
 write_out_stream (const char *filename, char *data) {
     char *d = ribs_malloc_sprintf("{ \"message\": \"%s|%s|%s\" }", hostname, filename, data);
@@ -121,27 +157,9 @@ write_out_stream (const char *filename, char *data) {
     return;
 #endif
     char* ra = replace_all(d, "\n", "\\n");
-    struct http_client_context *cctx = http_client_pool_create_client2(&client_pool, eserv.server, eserv.port, eserv.hostname, NULL);
-    if (NULL == cctx) {
-        LOGGER_ERROR("%s", "no context recoverable|FATAL_NO_TERM!");
-        return;
-    }
-    vmbuf_sprintf(&cctx->request, "POST %s/%s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n", eserv.context, eserv.hostname, eserv.hostname, strlen(ra));
-    vmbuf_memcpy(&cctx->request, ra, strlen(ra));
-    if (0 > http_client_send_request(cctx)) {
-        LOGGER_ERROR("failed to send request to %s", eserv.hostname);
-        return http_client_free(cctx);
-    }
-
-    yield();
-    struct http_client_context *rcctx = http_client_get_last_context();
-    if (rcctx->http_status_code != 201) {
-        LOGGER_PERROR("http_post failed with response code %d", rcctx->http_status_code);
-    } else {
-        LOGGER_INFO("%s|%s", "success", rcctx->content);
-    }
-    http_client_free(rcctx);
-    ++request_count;
+    int threshold = INTERFACE_ONERROR_RETRY_THRESHOLD;
+    while (0 > post_to_interface(ra) && (0 < threshold--))
+        post_to_interface(ra);
 }
 
 
@@ -260,7 +278,6 @@ _flush (
     }
 
     trigger_writer (name, filedef);
-    LOGGER_INFO("request_count:%d", request_count);
 }
 
 
