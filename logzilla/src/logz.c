@@ -126,8 +126,7 @@ write_out_stream (const char *filename, char *data) {
         LOGGER_ERROR("%s", "no context recoverable|FATAL_NO_TERM!");
         return;
     }
-    vmbuf_vsprintf(&cctx->request, "POST %s/%s", eserv.context, eserv.hostname);
-    vmbuf_sprintf(&cctx->request, " HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nConnection: Keep-Alive\r\nContent-Length: %zu\r\n\r\n", eserv.hostname, strlen(ra));
+    vmbuf_sprintf(&cctx->request, "POST %s/%s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nConnection: Keep-Alive\r\nContent-Length: %zu\r\n\r\n", eserv.context, eserv.hostname, eserv.hostname, strlen(ra));
     vmbuf_memcpy(&cctx->request, ra, strlen(ra));
     if (0 > http_client_send_request(cctx)) {
         LOGGER_ERROR("failed to send request to %s", eserv.hostname);
