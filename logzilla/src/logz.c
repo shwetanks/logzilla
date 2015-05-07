@@ -41,6 +41,7 @@ static const uint32_t inotify_file_watch_mask = (IN_MODIFY | IN_ATTRIB | IN_DELE
 
 #define COPY_TO_EOF UINTMAX_MAX
 #define INTERFACE_ONERROR_RETRY_THRESHOLD 2
+int success = 0, failure = 0;
 
 struct thashtable *tab_event_fds;
 struct thashtable *delta_push;
@@ -66,10 +67,17 @@ mtime_to_spec (const struct stat *st) {
 }
 
 void
+dump_stats () {
+    LOGGER_INFO("stats since alive:: success:%d | failures:%d", success, failure);
+}
+
+
+void
 logz_close_fd (int fd, const char *filename) {
     if (-1 != fd && close (fd))
         LOGGER_ERROR("failed to close file:%s (%d)", filename, fd);
 }
+
 
 void
 _replace(
@@ -141,9 +149,11 @@ post_to_interface (char *data) {
     yield();
     struct http_client_context *rcctx = http_client_get_last_context();
     if (rcctx->http_status_code != 201) {
+        ++failure;
         http_client_free(rcctx);
-        return LOGGER_ERROR("http_post failed with response code %d", rcctx->http_status_code), -1;
+        return -1;
     }
+    ++success;
     return http_client_free(rcctx), 0;
 }
 
@@ -160,15 +170,16 @@ write_out_stream (const char *filename, char *data) {
     char* ra = replace_all(d, "\n", "\\n");
     int threshold = INTERFACE_ONERROR_RETRY_THRESHOLD;
     while (0 > post_to_interface(ra) && (0 < threshold--)) {
-        if (0 == post_to_interface(ra))
+        if (0 == post_to_interface(ra)) {
+            --failure;
             break;
+        }
     }
 }
 
 
 static char *
 write_file_fringe (const char *filename, char *data, int fd) {
-    UNUSED(filename);
     thashtable_rec_t *rec = thashtable_lookup(delta_push, &fd, sizeof(fd));
     struct vmbuf delta = *(struct vmbuf *)thashtable_get_val(rec);
     char *past = vmbuf_data(&delta);
@@ -179,7 +190,7 @@ write_file_fringe (const char *filename, char *data, int fd) {
         char *trailing_past = ribs_malloc_sprintf("%.*s", ((int)strlen(data) - (int)strlen(lookahead)), data);
         if (trailing_past) {
             char *d_composite = ribs_malloc_sprintf("%s%s", past, trailing_past);
-            //write_out_stream(filename, d_composite);
+            write_out_stream(filename, d_composite);
             d_composite += strlen(d_composite); // advance by that
             vmbuf_reset(&delta);
         }
@@ -484,6 +495,7 @@ int main(int argc, char *argv[]) {
         LOGGER_ERROR("%s", "epoll_worker_init failed");
         exit(EXIT_FAILURE);
     }
+    ribs_timer(120, dump_stats);
 
     tab_event_fds = thashtable_create();
     delta_push    = thashtable_create();
