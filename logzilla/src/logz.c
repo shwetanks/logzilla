@@ -127,6 +127,7 @@ http_client_pool_post_request2(
     struct http_client_context *cctx = http_client_pool_create_client2(http_client_pool, addr, port, hostname, NULL);
     if (NULL == cctx)
         return -1;
+    vmbuf_reset(&cctx->request);
     vmbuf_strcpy(&cctx->request, "POST ");
     va_list ap;
     va_start(ap, format);
@@ -134,6 +135,7 @@ http_client_pool_post_request2(
     va_end(ap);
     vmbuf_sprintf(&cctx->request, " HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n", hostname, size_of_data);
     vmbuf_memcpy(&cctx->request, data, size_of_data);
+    vmbuf_chrcpy(&cctx->request, '\0');
     if (0 > http_client_send_request(cctx))
         return http_client_free(cctx), -1;
     return 0;
@@ -151,7 +153,7 @@ post_to_interface (char *data) {
     if (rcctx->http_status_code != 201) {
         ++failure;
         http_client_free(rcctx);
-        return -1;
+        return LOGGER_ERROR("request failed with code %d", rcctx->http_status_code), -1;
     }
     ++success;
     return http_client_free(rcctx), 0;
@@ -171,6 +173,7 @@ write_out_stream (const char *filename, char *data) {
     int threshold = INTERFACE_ONERROR_RETRY_THRESHOLD;
     while (0 > post_to_interface(ra) && (0 < threshold--)) {
         if (0 == post_to_interface(ra)) {
+            LOGGER_ERROR("post failed to %s, issuing reattempt#%d", eserv.hostname, threshold);
             --failure;
             break;
         }
