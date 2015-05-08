@@ -7,6 +7,7 @@
 #include "http_client_pool.h"
 #include "logz_util.h"
 #include "uri_encode.h"
+#include "json.h"
 
 struct logdaemon_config logconf = LOGDAEMON_INITIALIZER;
 
@@ -100,23 +101,6 @@ _replace(
     return;
 }
 
-char*
-replace_all (
-    char* const in,
-    const char* find,
-    const char* replace_with){
-
-    char* buffer = ribs_strdup(in);
-    char* ptr = strstr(buffer, find);
-    while(ptr && *ptr){
-        *ptr = '\0';
-        ptr += strlen(find);
-        buffer = ribs_malloc_sprintf("%s%s%s", buffer, replace_with, ptr);
-        ptr = strstr(buffer, find);
-    }
-    return buffer;
-}
-
 
 static int
 http_client_pool_post_request2(
@@ -142,9 +126,9 @@ http_client_pool_post_request2(
 }
 
 static int
-post_to_interface (char *data) {
+post_to_interface (char *data, size_t data_len) {
 
-    if (0 > http_client_pool_post_request2(&client_pool, eserv.server, eserv.port, eserv.hostname, data, strlen(data), "%s/%s", eserv.context, eserv.hostname)) {
+    if (0 > http_client_pool_post_request2(&client_pool, eserv.server, eserv.port, eserv.hostname, data, data_len, "%s/%s", eserv.context, eserv.hostname)) {
         return LOGGER_ERROR("failed to send request to %s", eserv.hostname), -1;
     }
 
@@ -161,18 +145,23 @@ post_to_interface (char *data) {
 
 static void
 write_out_stream (const char *filename, char *data) {
-    char *d = ribs_malloc_sprintf("{ \"message\": \"%s|%s|%s\" }", hostname, filename, data);
+    vmbuf_reset(&write_buffer);
+    vmbuf_sprintf(&write_buffer, "{ \"message\": \"%s|%s|", hostname, filename);
+    json_escape_str_vmb(&write_buffer, data);
+    vmbuf_strcpy(&write_buffer, "\" }");
+    vmbuf_chrcpy(&write_buffer, '\0');
+
 #ifdef WRITE_TO_FILE
-    if (0 > file_writer_write(&fw, d, strlen(d))) {
+    if (0 > file_writer_write(&fw, vmbuf_data(&write_buffer), vmbuf_wlocpos(&write_buffer))) {
         LOGGER_ERROR("%s", "failed write attempt on outfile| aborting to diagnose!");
         abort();
     }
     return;
 #endif
-    char* ra = replace_all(d, "\n", "\\n");
+
     int threshold = INTERFACE_ONERROR_RETRY_THRESHOLD;
-    while (0 > post_to_interface(ra) && (0 < threshold--)) {
-        if (0 == post_to_interface(ra)) {
+    while (0 > post_to_interface(vmbuf_data(&write_buffer), vmbuf_wlocpos(&write_buffer)) && (0 < threshold--)) {
+        if (0 == post_to_interface(vmbuf_data(&write_buffer), vmbuf_wlocpos(&write_buffer))) {
             LOGGER_ERROR("post failed to %s, issuing reattempt#%d", eserv.hostname, threshold);
             --failure;
             break;
@@ -253,7 +242,7 @@ trigger_writer (
             vmbuf_reset(&write_buffer);
             vmbuf_memcpy(&write_buffer, data, write_depth);
             vmbuf_chrcpy(&write_buffer, '\0');
-            write_out_stream(fn, vmbuf_data(&write_buffer));
+            write_out_stream(fn, ribs_strdup(vmbuf_data(&write_buffer)));
         } else if (0 == res) {
             break;
         }
@@ -498,7 +487,7 @@ int main(int argc, char *argv[]) {
         LOGGER_ERROR("%s", "epoll_worker_init failed");
         exit(EXIT_FAILURE);
     }
-    ribs_timer(120, dump_stats);
+    ribs_timer(60*1000, dump_stats);
 
     tab_event_fds = thashtable_create();
     delta_push    = thashtable_create();
@@ -549,6 +538,7 @@ int main(int argc, char *argv[]) {
         LOGGER_ERROR("%s", "failed to init inotify. cannot proceed. make sure you've inotify and is accessible to this user.");
         exit(EXIT_FAILURE);
     }
+
 
     if (!recursive_flush_events(wd, files, num_files)) {
         LOGGER_ERROR("%s", "collection failed");
