@@ -387,7 +387,7 @@ recursive_flush_events (
     while(1) {
         if (thashtable_get_size(tab_event_fds) == 0) {
             LOGGER_INFO("%s", "no file to read");
-            return false;
+            return true;
         }
 
         {
