@@ -9,7 +9,9 @@
 #include "uri_encode.h"
 #include "json.h"
 
+
 struct logdaemon_config logconf = LOGDAEMON_INITIALIZER;
+bool write_to_file = false;
 
 /* this server */
 static char *hostname = NULL;
@@ -151,13 +153,13 @@ write_out_stream (const char *filename, char *data) {
     vmbuf_strcpy(&write_buffer, "\" }");
     vmbuf_chrcpy(&write_buffer, '\0');
 
-#ifdef WRITE_TO_FILE
-    if (0 > file_writer_write(&fw, vmbuf_data(&write_buffer), vmbuf_wlocpos(&write_buffer))) {
+    if (write_to_file) {
+        if (0 > file_writer_write(&fw, vmbuf_data(&write_buffer), vmbuf_wlocpos(&write_buffer))) {
         LOGGER_ERROR("%s", "failed write attempt on outfile| aborting to diagnose!");
         abort();
     }
-    return;
-#endif
+        return;
+    }
 
     int threshold = INTERFACE_ONERROR_RETRY_THRESHOLD;
     while (0 > post_to_interface(vmbuf_data(&write_buffer), vmbuf_wlocpos(&write_buffer)) && (0 < threshold--)) {
@@ -382,8 +384,15 @@ recursive_flush_events (
     struct vmbuf evbuf = VMBUF_INITIALIZER;
     vmbuf_init(&evbuf, evlen);
 
-    ssize_t res    = 0;
-      
+    ssize_t res = 0;
+    struct timeval delay; /* how long to wait for file changes.  */
+    delay.tv_sec = (time_t) 0.50;
+    delay.tv_usec = 1000000 * (0.50 - delay.tv_sec);
+
+    fd_set rfd;
+    FD_ZERO (&rfd);
+    FD_SET (inotify_wd, &rfd);
+
     while(1) {
         if (thashtable_get_size(tab_event_fds) == 0) {
             LOGGER_INFO("%s", "no file to read");
@@ -391,7 +400,17 @@ recursive_flush_events (
         }
 
         {
+            int file_change = select(inotify_wd + 1, &rfd, NULL, NULL, NULL);
+
+            if (file_change == 0)
+                continue;
+            else if (file_change == -1) {
+                LOGGER_ERROR("%s", "error monitoring inotify event");
+                exit(EXIT_FAILURE);
+            }
+
             vmbuf_reset(&evbuf);
+
             while (0 < (res = read(inotify_wd, vmbuf_wloc(&evbuf), evlen))) {
                 if (0 > vmbuf_wseek(&evbuf, res))
                     return false;
@@ -400,6 +419,8 @@ recursive_flush_events (
                 else if (0 < res)
                     break;
             }
+            if (errno == EAGAIN && res < 0)
+                continue;
             // res might be 0, or could have overrun memory
             if (res == 0) {
                 LOGGER_ERROR("%s", "error reading inotify event|bad buffer size. aborting to investigate");
@@ -430,6 +451,7 @@ recursive_flush_events (
             tmp = &(filedef[x]);
             thashtable_remove(tab_event_fds, &tmp->wd, sizeof (tmp->wd));
             tmp->wd = wdx;
+            thashtable_insert(tab_event_fds, &tmp->wd, sizeof(tmp->wd), &tmp, sizeof(struct logz_file_def), &inserted);
             // rebalance new found file | make all assertions | we'll read from this as well.
             UNUSED(tmp);
         } else {
@@ -451,7 +473,6 @@ recursive_flush_events (
     }
     return true;
 }
-
 
 int main(int argc, char *argv[]) {
 
@@ -482,11 +503,11 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    //atexit(cleanup);
     if (0 > epoll_worker_init()) {
-        LOGGER_ERROR("%s", "epoll_worker_init failed");
+        LOGGER_ERROR("%s", "epoll_worker_init");
         exit(EXIT_FAILURE);
     }
+
     ribs_timer(60*1000, dump_stats);
 
     tab_event_fds = thashtable_create();
@@ -502,8 +523,7 @@ int main(int argc, char *argv[]) {
             LOGGER_ERROR("%s", "flie_writer");
             exit(EXIT_FAILURE);
         }
-
-#define WRITE_TO_FILE 1
+        write_to_file = true;
     } else if (!SSTRISEMPTY(logconf.interface)) {
 
         if (0 > http_client_pool_init(&client_pool, 20, 20)) {
@@ -529,16 +549,16 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+
     char _hostname[1024];
     gethostname(_hostname, 1024);
     hostname = ribs_strdup(_hostname);
 
-    int wd = inotify_init();
+    int wd = inotify_init1(IN_NONBLOCK);
     if (0 >= wd) {
         LOGGER_ERROR("%s", "failed to init inotify. cannot proceed. make sure you've inotify and is accessible to this user.");
         exit(EXIT_FAILURE);
     }
-
 
     if (!recursive_flush_events(wd, files, num_files)) {
         LOGGER_ERROR("%s", "collection failed");
