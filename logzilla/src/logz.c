@@ -5,7 +5,7 @@
 #include <libgen.h>
 #include <sys/stat.h>
 #include "http_client_pool.h"
-#include "logz_util.h"
+#include "logz_utils.h"
 #include "uri_encode.h"
 #include "json.h"
 
@@ -17,7 +17,7 @@ bool write_to_file = false;
 static char *hostname = NULL;
 
 /* server where we push data, if specified */
-struct receiving_server eserv;
+struct server eserv;
 
 #define MAX_FILE_SUPPORT 10
 #define HTTP_CLIENT_TIMEOUT 60000
@@ -81,29 +81,6 @@ logz_close_fd (int fd, const char *filename) {
         LOGGER_ERROR("failed to close file:%s (%d)", filename, fd);
 }
 
-
-void
-_replace(
-    char *in,
-    struct vmbuf *out,
-    const char *find,
-    const char *replace) {
-
-    char *fstart;
-
-    vmbuf_reset(out);
-    if(!(fstart = strstr(in, find))) {
-        vmbuf_strcpy(out, in);
-        return;
-    }
-    char *remainder = ribs_strdup(fstart + strlen(find));
-
-    vmbuf_memcpy(out, in, fstart-in);
-    vmbuf_sprintf(out, "%s%s", replace, remainder);
-    return;
-}
-
-
 static int
 http_client_pool_post_request2(
     struct http_client_pool *http_client_pool,
@@ -155,9 +132,9 @@ write_out_stream (const char *filename, char *data) {
 
     if (write_to_file) {
         if (0 > file_writer_write(&fw, vmbuf_data(&write_buffer), vmbuf_wlocpos(&write_buffer))) {
-        LOGGER_ERROR("%s", "failed write attempt on outfile| aborting to diagnose!");
-        abort();
-    }
+            LOGGER_ERROR("%s", "failed write attempt on outfile| aborting to diagnose!");
+            abort();
+        }
         return;
     }
 
@@ -543,7 +520,10 @@ int main(int argc, char *argv[]) {
         char *ln = strchr(interface, '/');
         ln = ribs_malloc_sprintf("%.*s", ((int)strlen(interface) - (int)strlen(ln)), interface);
 
-        parse_host_to_inet(ln, eserv.hostname, &eserv.server, &eserv.port);
+        if (0 > parse_host_to_inet(ln, eserv.hostname, &eserv.server, &eserv.port)) {
+            LOGGER_ERROR("%s", "server details invalid. cannot parse server");
+            exit(EXIT_FAILURE);
+        }
     } else {
         LOGGER_ERROR("%s", "no target defined. please use target or interface");
         exit(EXIT_FAILURE);

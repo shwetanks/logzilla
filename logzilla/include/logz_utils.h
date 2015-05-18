@@ -1,5 +1,5 @@
-#ifndef _LOGZ_UTIL_H_
-#define _LOGZ_UTIL_H_
+#ifndef _LOGZ_UTILS_H_
+#define _LOGZ_UTILS_H_
 
 #include <string.h>
 #include <stdlib.h>
@@ -53,4 +53,27 @@ parse_host_to_inet (
     return 0;
 }
 
-#endif /* _LOGZ_UTIL_H_ */
+
+void
+_replace(
+    char *in,
+    struct vmbuf *out,
+    const char *find,
+    const char *replace) {
+
+    char *fstart;
+
+    vmbuf_reset(out);
+    if(!(fstart = strstr(in, find))) {
+        vmbuf_strcpy(out, in);
+        return;
+    }
+    char *remainder = ribs_strdup(fstart + strlen(find));
+
+    vmbuf_memcpy(out, in, fstart-in);
+    vmbuf_sprintf(out, "%s%s", replace, remainder);
+    return;
+}
+
+
+#endif /* _LOGZ_UTILS_H_ */

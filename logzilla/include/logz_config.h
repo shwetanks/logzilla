@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#include "logz_struct_defs.h"
+
 #define LOGDAEMON_INITIALIZER {NULL, NULL, NULL, NULL}
 
 struct logdaemon_config {
@@ -16,13 +18,6 @@ struct logdaemon_config {
     char *exclude_files;
     char *target;
     char *interface;
-};
-
-struct receiving_server {
-    char hostname[128];
-    struct in_addr server;
-    uint16_t port;
-    char *context;
 };
 
 void
