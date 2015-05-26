@@ -2,3 +2,19 @@ requires python jsonpath module:
         sudo apt-get install pyton-pip
         pip install jsonpath-rw
 
+
+installing nltk:
+
+1. wget https://bootstrap.pypa.io/ez_setup.py -O - | sudo python
+2. sudo easy_install pip
+3. sudo pip install -U numpy (optional)
+4. sudo pip install -U nltk
+
+
+required files:
+1. etc/pos/<any_name>.txt : phrases most distinctively summarizing wellness of your application (e.g. INFO logs, startup logs etc.)
+2. etc/neg/<any_name>.txt : phrases summarizing downward trends, critical states etc. (e.g. ERROR/FATAL logs, possible runtime errors)
+
+
+
+                      
